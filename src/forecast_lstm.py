@@ -1,79 +1,86 @@
-"""Simple LSTM forecasting using PyTorch. Trains on each SKU separately (for clarity)."""
-import torch
-from torch import nn
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from sklearn.model_selection import train_test_split
-from src.utils import SeriesScaler
-
-MODEL_DIR = Path(__file__).resolve().parents[1] / "models"
-MODEL_DIR.mkdir(exist_ok=True)
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.preprocessing import MinMaxScaler
 
 
-class LSTMForecast(nn.Module):
-    def __init__(self, input_size=1, hidden_size=32, num_layers=1):
-        super().__init__()
+class LSTMForecaster(nn.Module):
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2, output_size=1):
+        super(LSTMForecaster, self).__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
+        self.fc = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
-        # x: (batch, seq_len, features)
         out, _ = self.lstm(x)
-        out = out[:, -1, :]
-        return self.fc(out)
+        out = self.fc(out[:, -1, :])  # last time step
+        return out
 
 
-def create_sequences(data, seq_len=14):
-    xs, ys = [], []
-    for i in range(len(data) - seq_len):
-        xs.append(data[i : i + seq_len])
-        ys.append(data[i + seq_len])
-    return np.array(xs), np.array(ys)
+def prepare_data(series, lookback=14):
+    """
+    Convert a demand series into sliding windows for LSTM.
+    """
+    X, y = [], []
+    for i in range(len(series) - lookback):
+        X.append(series[i:i + lookback])
+        y.append(series[i + lookback])
+    return np.array(X), np.array(y)
 
 
-def train_for_sku(series, epochs=120, lr=1e-3, seq_len=14, device='cpu'):
-    scaler = SeriesScaler()
-    s = scaler.fit_transform(series)
-    X, y = create_sequences(s, seq_len=seq_len)
-    X = X.reshape(-1, seq_len, 1)
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.15, random_state=42)
+def train_lstm(df, lookback=14, epochs=20, lr=0.01):
+    """
+    Train an LSTM on demand data and return model + scaler.
+    """
+    scaler = MinMaxScaler()
+    demand_scaled = scaler.fit_transform(df["demand"].values.reshape(-1, 1))
 
-    model = LSTMForecast()
-    model.to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.MSELoss()
+    X, y = prepare_data(demand_scaled, lookback)
+    X_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(-1)  # (batch, seq, 1)
+    y_tensor = torch.tensor(y, dtype=torch.float32)
 
-    X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
-    y_train_t = torch.tensor(y_train, dtype=torch.float32).unsqueeze(-1).to(device)
-    X_val_t = torch.tensor(X_val, dtype=torch.float32).to(device)
-    y_val_t = torch.tensor(y_val, dtype=torch.float32).unsqueeze(-1).to(device)
+    dataset = TensorDataset(X_tensor, y_tensor)
+    loader = DataLoader(dataset, batch_size=16, shuffle=True)
 
-    for ep in range(epochs):
-        model.train()
-        pred = model(X_train_t)
-        loss = loss_fn(pred, y_train_t)
-        opt.zero_grad(); loss.backward(); opt.step()
-        if ep % 40 == 0:
-            model.eval()
-            with torch.no_grad():
-                valp = model(X_val_t)
-                vloss = loss_fn(valp, y_val_t).item()
-            print(f"Epoch {ep} train_loss={loss.item():.4f} val_loss={vloss:.4f}")
+    model = LSTMForecaster()
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    # last seq -> forecast horizon
-    model.eval()
-    with torch.no_grad():
-        last_seq = torch.tensor(X[-1:].astype(np.float32)).to(device)
-        fut = model(last_seq).cpu().numpy().flatten()
-    fut_inv = scaler.inverse_transform(fut)
-    return model, fut_inv
+    for epoch in range(epochs):
+        for X_batch, y_batch in loader:
+            optimizer.zero_grad()
+            output = model(X_batch)
+            loss = criterion(output.squeeze(), y_batch)
+            loss.backward()
+            optimizer.step()
+        if (epoch + 1) % 5 == 0:
+            print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
+
+    return model, scaler
+
+
+def forecast(model, scaler, df, steps=14, lookback=14):
+    """
+    Forecast future demand using trained LSTM.
+    """
+    history = scaler.transform(df["demand"].values.reshape(-1, 1)).flatten().tolist()
+    preds = []
+
+    for _ in range(steps):
+        x = torch.tensor(history[-lookback:], dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
+        with torch.no_grad():
+            pred = model(x).item()
+        preds.append(pred)
+        history.append(pred)
+
+    preds = scaler.inverse_transform(np.array(preds).reshape(-1, 1)).flatten()
+    future_dates = pd.date_range(df["date"].iloc[-1] + pd.Timedelta(days=1), periods=steps, freq="D")
+    return pd.DataFrame({"date": future_dates, "forecast": preds})
 
 
 if __name__ == "__main__":
-    import pandas as pd
-    df = pd.read_csv(Path(__file__).resolve().parents[1] / "data/demo_demand.csv")
-    sku = df['sku'].unique()[0]
-    series = df[df['sku']==sku].sort_values('date')['demand'].values
-    model, forecast = train_for_sku(series, epochs=100)
-    print("Forecast (1-step):", forecast)
+    df = pd.read_csv("data/demo_demand.csv", parse_dates=["date"])
+    model, scaler = train_lstm(df)
+    forecast_df = forecast(model, scaler, df)
+    print(forecast_df.head())
