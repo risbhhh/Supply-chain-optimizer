@@ -1,53 +1,79 @@
-"""A simple inventory ordering optimizer using OR-Tools linear solver.
-Given forecasted demand for a horizon, decide order quantity at t=0 to minimize expected cost.
-This is a simplified demo: single period or limited horizon; extend for multi-period decisions.
 """
+Supply Chain Optimization using OR-Tools.
+
+Takes demand forecasts and decides optimal order quantities 
+to minimize holding + stockout + ordering costs.
+"""
+
 from ortools.linear_solver import pywraplp
-import numpy as np
 
 
-def optimize_orders(forecasts, on_hand, lead_time=0, max_order=1000, holding_cost=0.5, order_cost=10, stockout_cost=5):
-    # forecasts: array of demand for next H periods
+def optimize_inventory(
+    forecasts,
+    on_hand=100,
+    holding_cost=1.0,
+    stockout_cost=5.0,
+    order_cost=50.0,
+    max_order=1000,
+):
+    """
+    Optimize inventory decisions for the forecast horizon.
+    
+    Args:
+        forecasts (list): forecasted demand per period
+        on_hand (int): current inventory
+        holding_cost (float): per-unit holding cost
+        stockout_cost (float): per-unit stockout penalty
+        order_cost (float): fixed cost if an order is placed
+        max_order (int): maximum order quantity allowed
+    
+    Returns:
+        dict: optimal order plan + costs
+    """
     H = len(forecasts)
-    solver = pywraplp.Solver.CreateSolver('GLOP') or pywraplp.Solver.CreateSolver('CBC')
-    if solver is None:
-        raise RuntimeError("Could not create OR-Tools solver")
+    solver = pywraplp.Solver.CreateSolver("CBC")
+    if not solver:
+        raise RuntimeError("Could not initialize solver.")
 
-    # decision: order quantity at t=0
-    q = solver.NumVar(0.0, max_order, 'q')
+    # Decision variables
+    order = [solver.IntVar(0, max_order, f"order_{t}") for t in range(H)]
+    inventory = [solver.NumVar(0, solver.infinity(), f"inv_{t}") for t in range(H)]
+    shortage = [solver.NumVar(0, solver.infinity(), f"short_{t}") for t in range(H)]
+    order_indicator = [solver.IntVar(0, 1, f"y_{t}") for t in range(H)]  # binary for order cost
 
-    # expected inventory level after demand (simplified single period): inventory = on_hand + q - demand_sum
-    expected_inv = on_hand + q - sum(forecasts)
+    # Initial inventory balance
+    solver.Add(inventory[0] == on_hand + order[0] - forecasts[0] + shortage[0])
 
-    # costs
-    holding = holding_cost * solver.Max(expected_inv, 0)
-    # OR-Tools GLOP doesn't support Max directly; approximate by introducing variable
-    inv_pos = solver.NumVar(0.0, solver.infinity(), 'inv_pos')
-    # constraints: inv_pos >= expected_inv and inv_pos >= 0
-    solver.Add(inv_pos >= expected_inv)
-    solver.Add(inv_pos >= 0)
+    # Balance constraints for subsequent periods
+    for t in range(1, H):
+        solver.Add(inventory[t] == inventory[t - 1] + order[t] - forecasts[t] + shortage[t])
 
-    holding_cost_expr = holding_cost * inv_pos
-    order_cost_expr = order_cost * solver.Min(q, 1)  # if q>0 then incur fixed order cost (approx)
-    # Min not supported: approximate with binary would be needed; for demo use proportional
-    order_cost_expr = order_cost * (q / (q + 1e-6))
+    # Link order quantities to indicator (big-M formulation)
+    M = max_order
+    for t in range(H):
+        solver.Add(order[t] <= M * order_indicator[t])
 
-    stockout = stockout_cost * solver.Max(-expected_inv, 0)
-    short_pos = solver.NumVar(0.0, solver.infinity(), 'short_pos')
-    solver.Add(short_pos >= -expected_inv)
-    solver.Add(short_pos >= 0)
-    stockout_cost_expr = stockout_cost * short_pos
-
-    total_cost = holding_cost_expr + order_cost_expr + stockout_cost_expr
-
+    # Objective: minimize total cost
+    total_cost = (
+        holding_cost * sum(inventory)
+        + stockout_cost * sum(shortage)
+        + order_cost * sum(order_indicator)
+    )
     solver.Minimize(total_cost)
+
     status = solver.Solve()
-    if status not in (pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE):
-        raise RuntimeError("Solver failed")
+    if status != pywraplp.Solver.OPTIMAL:
+        raise RuntimeError("No optimal solution found.")
 
-    return {'order_qty': q.solution_value(), 'expected_inventory': expected_inv, 'objective': solver.Objective().Value()}
+    return {
+        "orders": [int(order[t].solution_value()) for t in range(H)],
+        "inventory": [inventory[t].solution_value() for t in range(H)],
+        "shortages": [shortage[t].solution_value() for t in range(H)],
+        "objective": solver.Objective().Value(),
+    }
 
 
-if __name__ == '__main__':
-    res = optimize_orders([30, 28, 25], on_hand=40)
-    print(res)
+if __name__ == "__main__":
+    sample_forecasts = [30, 25, 20, 35, 40]
+    result = optimize_inventory(sample_forecasts, on_hand=50)
+    print("Optimal Plan:", result)
