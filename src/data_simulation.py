@@ -1,29 +1,22 @@
-"""Generate synthetic demand time-series for multiple SKUs."""
-import numpy as np
 import pandas as pd
-from pathlib import Path
-
-OUT = Path(__file__).resolve().parents[1] / "data"
-OUT.mkdir(exist_ok=True)
+import numpy as np
 
 
-def generate_demand(n_skus=5, periods=180, seed=42):
+def generate_demand_data(n_days=180, seed=42):
+    """
+    Generate synthetic daily demand data with seasonality + randomness.
+    """
     np.random.seed(seed)
-    dates = pd.date_range(end=pd.Timestamp.today().normalize(), periods=periods)
-    rows = []
-    for sku in range(n_skus):
-        base = np.random.randint(20, 100)
-        trend = np.linspace(0, np.random.randint(-5, 20), periods)
-        season = 10 * np.sin(np.linspace(0, 6 * np.pi, periods) + np.random.rand())
-        noise = np.random.normal(0, 5, size=periods)
-        demand = np.clip(base + trend + season + noise, a_min=0, a_max=None).round().astype(int)
-        df = pd.DataFrame({"date": dates, "sku": f"SKU_{sku+1}", "demand": demand})
-        rows.append(df)
-    out = pd.concat(rows)
-    out.to_csv(OUT / "demo_demand.csv", index=False)
-    return out
+    days = pd.date_range(start="2023-01-01", periods=n_days, freq="D")
+    base_demand = 50 + 10 * np.sin(np.linspace(0, 6 * np.pi, n_days))  # seasonality
+    noise = np.random.normal(0, 5, n_days)  # random fluctuation
+    demand = np.maximum(10, base_demand + noise).astype(int)
+
+    df = pd.DataFrame({"date": days, "demand": demand})
+    return df
 
 
 if __name__ == "__main__":
-    df = generate_demand()
-    print("Saved:", df.shape)
+    df = generate_demand_data()
+    df.to_csv("data/demo_demand.csv", index=False)
+    print("✅ Demand data saved to data/demo_demand.csv")
