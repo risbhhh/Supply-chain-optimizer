@@ -1,23 +1,23 @@
-import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
 
 
-def group_series_to_matrix(df, sku, date_col="date", value_col="demand"):
-    sub = df[df['sku'] == sku].sort_values(date_col)
-    return sub[value_col].values.astype(float)
+def load_demand_data(path="data/demo_demand.csv"):
+    """
+    Load demand data from CSV.
+    """
+    return pd.read_csv(path, parse_dates=["date"])
 
 
-class SeriesScaler:
-    def __init__(self):
-        self.scaler = StandardScaler()
-
-    def fit_transform(self, series):
-        series = series.reshape(-1, 1)
-        scaled = self.scaler.fit_transform(series).flatten()
-        return scaled
-
-    def inverse_transform(self, scaled):
-        arr = np.array(scaled).reshape(-1, 1)
-        inv = self.scaler.inverse_transform(arr).flatten()
-        return inv
+def plot_demand(df, title="Demand over time"):
+    """
+    Quick plot of demand data.
+    """
+    plt.figure(figsize=(10, 4))
+    plt.plot(df["date"], df["demand"], marker="o", markersize=2, linestyle="-")
+    plt.title(title)
+    plt.xlabel("Date")
+    plt.ylabel("Demand")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
